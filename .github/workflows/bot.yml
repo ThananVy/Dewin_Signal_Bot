@@ -1,10 +1,10 @@
 name: Forex Signal Bot
 
 on:
-  workflow_dispatch:  # Triggered precisely by cron-job.org every 10 minutes
+  workflow_dispatch:  # Triggered by cron-job.org every 10 minutes
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Fix Node.js deprecation warning
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   run-signals:
@@ -12,30 +12,26 @@ jobs:
     timeout-minutes: 8
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # Restore signal cache from previous run (for change detection)
       - name: Restore signal cache
         uses: actions/cache@v4
         with:
           path: signal_cache.json
           key: signal-cache-${{ github.run_id }}
-          restore-keys: |
-            signal-cache-
+          restore-keys: signal-cache-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run analysis and send signals
+      - name: Run analysis
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-2.0-flash
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: llama-3.1-8b-instant
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           MIN_CONFIDENCE: ${{ secrets.MIN_CONFIDENCE || '60' }}

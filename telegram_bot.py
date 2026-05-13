@@ -1,4 +1,4 @@
-"""telegram_bot.py — Sends signals to Telegram. Cambodia Time (UTC+7). Setup-only alerts."""
+"""telegram_bot.py — Sends signals to Telegram. Cambodia Time (UTC+7)."""
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -9,17 +9,24 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ICT = timezone(timedelta(hours=7))
-BIAS_EMOJI = {"BULLISH": "📈", "BEARISH": "📉"}
-PAIR_LABEL = {"EURUSD": "EUR/USD", "USDJPY": "USD/JPY", "GOLD": "XAU/USD (Gold)"}
+
+PAIR_LABEL = {"EURUSD": "EUR/USD", "USDJPY": "USD/JPY", "GOLD": "XAU/USD"}
+PAIR_DECIMALS = {"EURUSD": 5, "USDJPY": 3, "GOLD": 2}
+DIR_EMOJI = {"LONG": "🟢", "SHORT": "🔴"}
 
 
 def _ict_now() -> str:
-    return datetime.now(ICT).strftime("%Y-%m-%d %H:%M ICT")
+    return datetime.now(ICT).strftime("%H:%M ICT")
+
+
+def _fmt_price(price: float, pair: str) -> str:
+    decimals = PAIR_DECIMALS.get(pair, 5)
+    return f"{price:.{decimals}f}"
 
 
 def _conf_bar(score: int) -> str:
     filled = round(score / 20)
-    return "█" * filled + "░" * (5 - filled) + f" {score}%"
+    return "█" * filled + "░" * (5 - filled)
 
 
 def _parse_chat_ids() -> list[str]:
@@ -57,66 +64,86 @@ class TelegramBot:
     def send_startup(self, pairs: list[str], interval: int) -> None:
         pairs_str = ", ".join(PAIR_LABEL.get(p, p) for p in pairs)
         self._broadcast(
-            f"🤖 <b>Signal Bot Started</b>\n"
-            f"📌 Pairs: {pairs_str}\n"
-            f"⏱ Every {interval} min | 7AM–11PM Cambodia\n"
-            f"🎯 Min confidence: {_min_confidence()}%\n"
-            f"🕐 {_ict_now()}"
+            f"<b>Signal Bot Started</b>\n"
+            f"Pairs: {pairs_str}\n"
+            f"Every {interval} min  |  7AM-11PM Cambodia\n"
+            f"Min confidence: {_min_confidence()}%  |  {_ict_now()}"
         )
 
     def send_signal(self, signal: dict, reason: str = "") -> bool:
-        bias = signal.get("bias", "NEUTRAL")
-        if bias not in ("BULLISH", "BEARISH") or "error" in signal:
+        direction = signal.get("direction", "")
+        bias = signal.get("bias", "")
+
+        # Accept both old-style (BULLISH/BEARISH) and new-style (LONG/SHORT)
+        if direction not in ("LONG", "SHORT"):
+            if bias == "BULLISH":
+                direction = "LONG"
+            elif bias == "BEARISH":
+                direction = "SHORT"
+            else:
+                return False
+
+        if "error" in signal:
             return False
 
-        raw_conf = signal.get("confidence", 0)
-        score = int(raw_conf) if isinstance(raw_conf, (int, float)) else 0
-        if score < _min_confidence():
-            print(f"    Skip: confidence {score}% < {_min_confidence()}%")
+        conf = int(signal.get("confidence", 0))
+        if conf < _min_confidence():
+            print(f"    Skip: confidence {conf}% < {_min_confidence()}%")
             return False
 
         pair = signal.get("pair", "")
         label = PAIR_LABEL.get(pair, pair)
-        ez = signal.get("entry_zone", {})
+        emoji = DIR_EMOJI.get(direction, "")
 
+        entry = signal.get("entry", 0)
+        sl = signal.get("stop_loss", 0)
+        be = signal.get("be", entry)
+        tp = signal.get("tp", 0)
+        sl_pips = signal.get("sl_pips", 0)
+        tp_pips = signal.get("tp_pips", 0)
+        tp_rr = signal.get("tp_rr", 2.0)
+        rr_str = f"1:{int(tp_rr) if tp_rr == int(tp_rr) else tp_rr}"
+
+        p = _fmt_price
         text = (
-            f"{BIAS_EMOJI.get(bias, '')} <b>{label} — {bias}</b>\n"
-            f"📊 Confidence: <b>{_conf_bar(score)}</b>\n"
-            f"🕐 {_ict_now()}  |  {reason}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 <b>Entry :</b> {ez.get('from')} — {ez.get('to')}\n"
-            f"🛑 <b>SL    :</b> {signal.get('stop_loss')}  ({signal.get('sl_pips')} pips)\n"
-            f"✅ <b>TP1   :</b> {signal.get('tp1')}  <i>(1:1)</i>\n"
-            f"🏆 <b>TP2   :</b> {signal.get('tp2')}  <i>(1:2)</i>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📋 <i>{signal.get('entry_condition', '')}</i>\n"
-            f"❌ <b>Cancel if:</b> {signal.get('invalidation', '')}\n"
+            f"{emoji} <b>{direction} — {label}</b>\n"
+            f"{_conf_bar(conf)} {conf}% hit TP  |  {rr_str} R:R  |  {_ict_now()}\n"
+            f"<i>{reason}</i>\n"
+            "─────────────────────\n"
+            f"<b>Entry</b>  {p(entry, pair)}\n"
+            f"<b>SL</b>     {p(sl, pair)}  (-{sl_pips} pips)\n"
+            f"<b>BE</b>     {p(be, pair)}  (move SL at +{sl_pips} pips)\n"
+            f"<b>TP</b>     {p(tp, pair)}  (+{tp_pips} pips)\n"
+            "─────────────────────\n"
+            f"<i>{signal.get('entry_condition', '')}</i>\n"
+            f"<i>{signal.get('timeframe_confluence', '')}</i>"
         )
-        tfc = signal.get("timeframe_confluence", "")
-        if tfc:
-            text += f"\n💬 <i>{tfc}</i>"
         return self._broadcast(text)
 
     def send_heartbeat(self, signals: dict, next_run: str) -> None:
         min_conf = _min_confidence()
-        lines = [f"💓 <b>Heartbeat</b> — {_ict_now()}\n"]
-        active = [(p, s) for p, s in signals.items()
-                  if s.get("bias") in ("BULLISH", "BEARISH")
-                  and int(s.get("confidence", 0)) >= min_conf
-                  and "error" not in s]
+        lines = [f"<b>Heartbeat</b>  {_ict_now()}\n"]
+        active = [
+            (p, s) for p, s in signals.items()
+            if s.get("bias") in ("BULLISH", "BEARISH")
+            and int(s.get("confidence", 0)) >= min_conf
+            and "error" not in s
+        ]
         if active:
-            lines.append("🔥 <b>Active setups:</b>")
+            lines.append("<b>Active setups:</b>")
             for pair, sig in active:
-                ez = sig.get("entry_zone", {})
+                d = sig.get("direction", "LONG" if sig["bias"] == "BULLISH" else "SHORT")
+                e = DIR_EMOJI.get(d, "")
+                p = _fmt_price
                 lines.append(
-                    f"{BIAS_EMOJI.get(sig['bias'], '')} {PAIR_LABEL.get(pair, pair)}: "
-                    f"<b>{sig['bias']}</b> {sig.get('confidence')}% | "
-                    f"Entry {ez.get('from')}–{ez.get('to')} SL {sig.get('stop_loss')} TP1 {sig.get('tp1')}"
+                    f"{e} {PAIR_LABEL.get(pair, pair)}  {d}  {sig.get('confidence')}%  "
+                    f"Entry {p(sig.get('entry', 0), pair)}  "
+                    f"TP {p(sig.get('tp', 0), pair)}"
                 )
         else:
-            lines.append(f"😴 No setups ≥{min_conf}% right now.")
-        lines.append(f"\n⏭ Next: {next_run}")
+            lines.append(f"No setups >= {min_conf}% right now.")
+        lines.append(f"\nNext: {next_run}")
         self._broadcast("\n".join(lines), silent=True)
 
     def send_error(self, message: str) -> None:
-        self._broadcast(f"⚠️ <b>Bot Error</b>\n<code>{message[:400]}</code>")
+        self._broadcast(f"<b>Bot Error</b>\n<code>{message[:400]}</code>")
