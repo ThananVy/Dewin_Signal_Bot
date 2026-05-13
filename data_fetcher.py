@@ -47,22 +47,6 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _resample_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
-    """Resample 1H OHLCV data to 4H bars."""
-    df_4h = df_1h.resample("4h").agg(
-        {
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Close": "last",
-            "Volume": "sum",
-        }
-    )
-    df_4h = df_4h.dropna(subset=["Open", "High", "Low", "Close"])
-    df_4h = df_4h[df_4h["Close"] > 0]
-    return df_4h
-
-
 def _fetch_once(ticker_symbol: str, period: str, interval: str) -> pd.DataFrame:
     """Single yfinance download attempt."""
     tkr = yf.Ticker(ticker_symbol)
@@ -88,27 +72,26 @@ def fetch_pair_data(pair_name: str, retry: bool = True) -> dict | None:
             raise ValueError(f"Empty daily data for {symbol}")
         daily = _clean(daily_raw)
 
-        # --- 1H source data (6 months covers both 4H and 1H needs) ---
-        h1_raw = _fetch_once(symbol, "6mo", "1h")
+        # --- 1H (3 months) ---
+        h1_raw = _fetch_once(symbol, "3mo", "1h")
         if h1_raw.empty:
             raise ValueError(f"Empty 1H data for {symbol}")
-        h1_6mo = _clean(h1_raw)
+        h1 = _clean(h1_raw)
 
-        # --- 4H: resample 6mo of 1H ---
-        h4 = _resample_4h(h1_6mo)
-
-        # --- 1H: last 3 months slice ---
-        cutoff = datetime.utcnow() - timedelta(days=90)
-        h1 = h1_6mo[h1_6mo.index >= cutoff].copy()
+        # --- 15m (7 days) — entry timeframe for scalping ---
+        m15_raw = _fetch_once(symbol, "7d", "15m")
+        if m15_raw.empty:
+            raise ValueError(f"Empty 15m data for {symbol}")
+        m15 = _clean(m15_raw)
 
         if len(daily) < 50:
             raise ValueError(f"Insufficient daily rows ({len(daily)}) for {symbol}")
-        if len(h4) < 30:
-            raise ValueError(f"Insufficient 4H rows ({len(h4)}) for {symbol}")
         if len(h1) < 50:
             raise ValueError(f"Insufficient 1H rows ({len(h1)}) for {symbol}")
+        if len(m15) < 50:
+            raise ValueError(f"Insufficient 15m rows ({len(m15)}) for {symbol}")
 
-        return {"Daily": daily, "4H": h4, "1H": h1}
+        return {"Daily": daily, "1H": h1, "15m": m15}
 
     try:
         return attempt()

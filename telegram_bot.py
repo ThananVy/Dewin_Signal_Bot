@@ -1,8 +1,4 @@
-"""
-telegram_bot.py — Sends trading signal messages to multiple Telegram chats.
-Only sends BULLISH/BEARISH setups with confidence >= MIN_CONFIDENCE (default 60%).
-Uses Cambodia Time (UTC+7).
-"""
+"""telegram_bot.py — Sends signals to Telegram. Cambodia Time (UTC+7). Setup-only alerts."""
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -12,31 +8,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-ICT = timezone(timedelta(hours=7))  # Cambodia / Indochina Time (UTC+7)
-
+ICT = timezone(timedelta(hours=7))
 BIAS_EMOJI = {"BULLISH": "📈", "BEARISH": "📉"}
-
-PAIR_LABEL = {
-    "EURUSD": "EUR/USD",
-    "USDJPY": "USD/JPY",
-    "GOLD": "XAU/USD (Gold)",
-}
+PAIR_LABEL = {"EURUSD": "EUR/USD", "USDJPY": "USD/JPY", "GOLD": "XAU/USD (Gold)"}
 
 
-def _ict_now(fmt: str = "%Y-%m-%d %H:%M ICT") -> str:
-    return datetime.now(ICT).strftime(fmt)
+def _ict_now() -> str:
+    return datetime.now(ICT).strftime("%Y-%m-%d %H:%M ICT")
 
 
 def _conf_bar(score: int) -> str:
-    """Visual confidence bar: e.g. 75 → '███░░ 75%'"""
-    filled = round(score / 20)  # 5 blocks total
-    bar = "█" * filled + "░" * (5 - filled)
-    return f"{bar} {score}%"
+    filled = round(score / 20)
+    return "█" * filled + "░" * (5 - filled) + f" {score}%"
 
 
 def _parse_chat_ids() -> list[str]:
     raw = os.getenv("TELEGRAM_CHAT_IDS", os.getenv("TELEGRAM_CHAT_ID", ""))
-    return [cid.strip() for cid in raw.split(",") if cid.strip()]
+    return [c.strip() for c in raw.split(",") if c.strip()]
 
 
 def _min_confidence() -> int:
@@ -44,138 +32,90 @@ def _min_confidence() -> int:
 
 
 class TelegramBot:
-    def __init__(self, token: str = None):
-        self.token = token or os.getenv("TELEGRAM_BOT_TOKEN", "")
+    def __init__(self):
+        self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_ids = _parse_chat_ids()
         self._base = f"https://api.telegram.org/bot{self.token}"
 
-    def _post_to(self, chat_id: str, text: str, silent: bool = False) -> bool:
-        try:
-            resp = requests.post(
-                f"{self._base}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                    "disable_notification": silent,
-                },
-                timeout=10,
-            )
-            return resp.ok
-        except Exception as exc:
-            print(f"  Telegram error (chat {chat_id}): {exc}")
-            return False
-
     def _broadcast(self, text: str, silent: bool = False) -> bool:
         if not self.token or not self.chat_ids:
-            print("  WARNING: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_IDS not set in .env")
+            print("  WARNING: Telegram credentials missing in .env")
             return False
-        results = [self._post_to(cid, text, silent) for cid in self.chat_ids]
-        return any(results)
+        ok = False
+        for cid in self.chat_ids:
+            try:
+                r = requests.post(f"{self._base}/sendMessage", json={
+                    "chat_id": cid, "text": text, "parse_mode": "HTML",
+                    "disable_web_page_preview": True, "disable_notification": silent,
+                }, timeout=10)
+                if r.ok:
+                    ok = True
+            except Exception as e:
+                print(f"  Telegram error ({cid}): {e}")
+        return ok
 
-    # ── Public methods ────────────────────────────────────────
-
-    def send_startup(self, pairs: list[str], interval_minutes: int) -> None:
+    def send_startup(self, pairs: list[str], interval: int) -> None:
         pairs_str = ", ".join(PAIR_LABEL.get(p, p) for p in pairs)
-        recipients = len(self.chat_ids)
-        text = (
-            "🤖 <b>Trading Signal Bot Started</b>\n\n"
-            f"📌 Pairs      : {pairs_str}\n"
-            f"⏱ Interval   : every {interval_minutes} minutes\n"
-            f"🎯 Min. Conf. : {_min_confidence()}%\n"
-            f"👥 Recipients : {recipients} user(s)\n"
-            f"🕐 {_ict_now()}\n\n"
-            f"Signals sent only when confidence ≥ <b>{_min_confidence()}%</b> "
-            f"and bias is <b>BULLISH or BEARISH</b>."
+        self._broadcast(
+            f"🤖 <b>Signal Bot Started</b>\n"
+            f"📌 Pairs: {pairs_str}\n"
+            f"⏱ Every {interval} min | 7AM–11PM Cambodia\n"
+            f"🎯 Min confidence: {_min_confidence()}%\n"
+            f"🕐 {_ict_now()}"
         )
-        self._broadcast(text)
 
-    def send_signal(self, signal: dict, reason: str = "New signal") -> bool:
+    def send_signal(self, signal: dict, reason: str = "") -> bool:
         bias = signal.get("bias", "NEUTRAL")
-
-        # Only send real directional setups
         if bias not in ("BULLISH", "BEARISH") or "error" in signal:
             return False
 
-        # Confidence filter — support both int (new) and string (fallback)
         raw_conf = signal.get("confidence", 0)
-        if isinstance(raw_conf, str):
-            conf_score = {"HIGH": 80, "MEDIUM": 65, "LOW": 40}.get(raw_conf.upper(), 0)
-        else:
-            conf_score = int(raw_conf)
-
-        min_conf = _min_confidence()
-        if conf_score < min_conf:
-            print(f"    Skipping — confidence {conf_score}% < {min_conf}% threshold")
+        score = int(raw_conf) if isinstance(raw_conf, (int, float)) else 0
+        if score < _min_confidence():
+            print(f"    Skip: confidence {score}% < {_min_confidence()}%")
             return False
 
-        pair = signal.get("pair", "UNKNOWN")
+        pair = signal.get("pair", "")
         label = PAIR_LABEL.get(pair, pair)
-        be = BIAS_EMOJI.get(bias, "")
-
         ez = signal.get("entry_zone", {})
-        entry_from = ez.get("from", "?")
-        entry_to   = ez.get("to", "?")
-        sl         = signal.get("stop_loss", "?")
-        sl_pips    = signal.get("sl_pips", "?")
-        tp1        = signal.get("tp1", "?")
-        tp2        = signal.get("tp2", "?")
-        rr         = signal.get("risk_reward", "?")
-        entry_cond = signal.get("entry_condition", "")
-        invalidate = signal.get("invalidation", "")
-        tfc        = signal.get("timeframe_confluence", "")
 
         text = (
-            f"{be} <b>{label}  —  {bias}</b>\n"
-            f"📊 Confidence : <b>{_conf_bar(conf_score)}</b>\n"
+            f"{BIAS_EMOJI.get(bias, '')} <b>{label} — {bias}</b>\n"
+            f"📊 Confidence: <b>{_conf_bar(score)}</b>\n"
             f"🕐 {_ict_now()}  |  {reason}\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 <b>Entry  :</b>  {entry_from} — {entry_to}\n"
-            f"🛑 <b>SL     :</b>  {sl}  <i>({sl_pips} pips)</i>\n"
-            f"✅ <b>TP1    :</b>  {tp1}\n"
-            f"🏆 <b>TP2    :</b>  {tp2}\n"
-            f"⚖️ <b>R:R    :</b>  {rr}\n"
+            f"🎯 <b>Entry :</b> {ez.get('from')} — {ez.get('to')}\n"
+            f"🛑 <b>SL    :</b> {signal.get('stop_loss')}  ({signal.get('sl_pips')} pips)\n"
+            f"✅ <b>TP1   :</b> {signal.get('tp1')}  <i>(1:1)</i>\n"
+            f"🏆 <b>TP2   :</b> {signal.get('tp2')}  <i>(1:2)</i>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📋 <i>{entry_cond}</i>\n"
-            f"❌ <b>Cancel if:</b> {invalidate}\n"
+            f"📋 <i>{signal.get('entry_condition', '')}</i>\n"
+            f"❌ <b>Cancel if:</b> {signal.get('invalidation', '')}\n"
         )
+        tfc = signal.get("timeframe_confluence", "")
         if tfc:
             text += f"\n💬 <i>{tfc}</i>"
-
         return self._broadcast(text)
 
     def send_heartbeat(self, signals: dict, next_run: str) -> None:
         min_conf = _min_confidence()
-        active = {}
-        for p, s in signals.items():
-            if s.get("bias") not in ("BULLISH", "BEARISH") or "error" in s:
-                continue
-            raw = s.get("confidence", 0)
-            score = int(raw) if isinstance(raw, (int, float)) else {"HIGH": 80, "MEDIUM": 65, "LOW": 40}.get(str(raw).upper(), 0)
-            if score >= min_conf:
-                active[p] = {**s, "_score": score}
-
-        lines = [f"💓 <b>Heartbeat</b>  —  {_ict_now()}\n"]
-
+        lines = [f"💓 <b>Heartbeat</b> — {_ict_now()}\n"]
+        active = [(p, s) for p, s in signals.items()
+                  if s.get("bias") in ("BULLISH", "BEARISH")
+                  and int(s.get("confidence", 0)) >= min_conf
+                  and "error" not in s]
         if active:
             lines.append("🔥 <b>Active setups:</b>")
-            for pair, sig in active.items():
-                label = PAIR_LABEL.get(pair, pair)
-                bias  = sig.get("bias", "?")
-                score = sig["_score"]
-                ez    = sig.get("entry_zone", {})
-                be    = BIAS_EMOJI.get(bias, "")
+            for pair, sig in active:
+                ez = sig.get("entry_zone", {})
                 lines.append(
-                    f"{be} <b>{label}</b>  {bias}  {score}%\n"
-                    f"   Entry {ez.get('from','?')}–{ez.get('to','?')} "
-                    f"| SL {sig.get('stop_loss','?')} "
-                    f"| TP1 {sig.get('tp1','?')}"
+                    f"{BIAS_EMOJI.get(sig['bias'], '')} {PAIR_LABEL.get(pair, pair)}: "
+                    f"<b>{sig['bias']}</b> {sig.get('confidence')}% | "
+                    f"Entry {ez.get('from')}–{ez.get('to')} SL {sig.get('stop_loss')} TP1 {sig.get('tp1')}"
                 )
         else:
-            lines.append(f"😴 No setups ≥ {min_conf}% confidence right now.")
-
-        lines.append(f"\n⏭ Next check: {next_run}")
+            lines.append(f"😴 No setups ≥{min_conf}% right now.")
+        lines.append(f"\n⏭ Next: {next_run}")
         self._broadcast("\n".join(lines), silent=True)
 
     def send_error(self, message: str) -> None:

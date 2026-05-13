@@ -1,174 +1,207 @@
 """
-claude_analyst.py — Builds structured prompts and calls Google Gemini API.
-Uses gemini-2.0-flash (free tier: 1,500 requests/day, 1M tokens/day).
-
-Free API key: https://aistudio.google.com  (no credit card required)
+claude_analyst.py — Single merged prompt for all 3 pairs via Groq.
+Model returns only: bias, entry, stop_loss, confidence + text fields.
+All derived values (entry_zone, sl_pips, tp1, tp2, r:r) are calculated in Python.
 """
 
 import json
 import os
 import re
 
-import google.generativeai as genai
+from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
-PAIR_DISPLAY = {
-    "EURUSD": "EURUSD",
-    "USDJPY": "USDJPY",
-    "GOLD": "XAUUSD (Gold)",
-}
-
-PIP_MULTIPLIER = {
-    "EURUSD": 10000,
-    "USDJPY": 100,
-    "GOLD": 10,
-}
+PAIR_DISPLAY = {"EURUSD": "EURUSD", "USDJPY": "USDJPY", "GOLD": "XAUUSD (Gold)"}
+PIP_MULTIPLIER = {"EURUSD": 10000, "USDJPY": 100, "GOLD": 10}
 
 
-def _fmt(val, fallback: str = "N/A") -> str:
-    return str(val) if val is not None else fallback
+def _slim_pair_block(pair: str, summaries: dict) -> str:
+    """Compact data block for one pair across 3 timeframes."""
+    display = PAIR_DISPLAY.get(pair, pair)
+    pip_mult = PIP_MULTIPLIER.get(pair, 10000)
+    # Use the JSON key name as the header so the model knows which key to use in its response
+    lines = [f"\n### {pair} [{display}]  (pip_mult={pip_mult}, JSON key: \"{pair}\")"]
 
+    for tf in ["Daily", "1H", "15m"]:
+        s = summaries.get(tf, {})
+        if not s:
+            continue
+        sqz = s.get("squeeze", {})
+        highs = s.get("swing_highs", [])[-3:]
+        lows = s.get("swing_lows", [])[-3:]
 
-def _squeeze_str(sq: dict) -> str:
-    return f"Status={sq.get('status', 'UNKNOWN')} | Momentum={sq.get('momentum', 'N/A')}"
-
-
-def _tf_block(label: str, s: dict, include_ema200: bool = True) -> str:
-    lines = [
-        f"### {label}",
-        f"- Close: {_fmt(s.get('close'))}",
-        f"- EMA 20: {_fmt(s.get('ema_20'))}  |  EMA 50: {_fmt(s.get('ema_50'))}  |  EMA 200: {_fmt(s.get('ema_200'))}",
-    ]
-    if include_ema200:
-        above = s.get("above_ema200")
-        lines.append(f"- Price vs EMA 200: {'ABOVE' if above else 'BELOW' if above is not None else 'N/A'}")
-    lines += [
-        f"- EMA Alignment: {_fmt(s.get('ema_alignment'))}",
-        f"- SuperTrend: {_fmt(s.get('supertrend_direction'))}",
-        f"- ATR(14): {_fmt(s.get('atr'))}",
-        f"- Squeeze: {_squeeze_str(s.get('squeeze', {}))}",
-        f"- Volume: {_fmt(s.get('volume'))}  |  Avg(20): {_fmt(s.get('volume_avg'))}  |  Ratio: {_fmt(s.get('volume_vs_avg'))}x",
-        f"- Swing Highs (last 5): {json.dumps(s.get('swing_highs', []))}",
-        f"- Swing Lows  (last 5): {json.dumps(s.get('swing_lows', []))}",
-    ]
+        lines.append(
+            f"[{tf}] Close={s.get('close')} | EMA={s.get('ema_alignment')} | "
+            f"ST={s.get('supertrend_direction')} | ATR={s.get('atr')} | "
+            f"SQZ={sqz.get('status')}/{sqz.get('momentum')} | "
+            f"SwingHighs={[h['price'] for h in highs]} | SwingLows={[l['price'] for l in lows]}"
+        )
     return "\n".join(lines)
 
 
-def build_prompt_full(pair: str, daily: dict, h4: dict, h1: dict) -> str:
-    display = PAIR_DISPLAY.get(pair, pair)
-    pip_mult = PIP_MULTIPLIER.get(pair, 10000)
-    current_price = h1.get("close") or h4.get("close") or daily.get("close")
-
-    return f"""You are a professional multi-timeframe technical analyst. Analyze {display} and return a precise trading signal.
-
-## MARKET DATA — {display}
-Current Price: {current_price}
-
----
-{_tf_block("DAILY (Trend Bias)", daily, include_ema200=True)}
-
----
-{_tf_block("4H (Trade Structure)", h4, include_ema200=True)}
-
----
-{_tf_block("1H (Entry Timing)", h1, include_ema200=False)}
-
----
-## ANALYSIS RULES
-1. Determine bias by checking Daily → 4H → 1H alignment.
-2. If all three timeframes do NOT agree on direction, set "bias": "NEUTRAL" and leave entry/SL/TP as 0.0.
-3. When aligned:
-   - Entry zone: use last swing levels as support/resistance.
-   - Stop Loss: beyond the last significant opposing swing + 0.5× 4H ATR buffer.
-   - TP1: first major swing/structure target (minimum 1:1 R:R).
-   - TP2: second major target (minimum 1:2 R:R).
-   - sl_pips: SL distance × {pip_mult} (pip multiplier for {display}).
-4. risk_reward format: "1:X.X" based on TP1 distance / SL distance.
-5. Use exact price levels from the swing data above.
-
-## RESPONSE FORMAT
-Return ONLY a valid JSON object — no markdown fences, no extra text:
-{{
-  "pair": "{pair}",
-  "bias": "BULLISH",
-  "entry_zone": {{"from": 0.0000, "to": 0.0000}},
-  "entry_condition": "specific trigger required before entry",
-  "stop_loss": 0.0000,
-  "sl_pips": 0,
-  "tp1": 0.0000,
-  "tp2": 0.0000,
-  "risk_reward": "1:0.0",
-  "invalidation": "specific condition that cancels this setup",
-  "confidence": 75,
-  "timeframe_confluence": "one sentence explaining how Daily+4H+1H align or conflict"
-}}
-Note: confidence is an integer 0-100. Use 80-100 for strong multi-TF alignment, 60-79 for moderate, below 60 for weak/uncertain."""
+def _get_ref_summary(summaries: dict) -> dict:
+    """15m is the entry timeframe for scalping — use its ATR/close for SL zone calculation."""
+    return summaries.get("15m") or summaries.get("1H") or summaries.get("Daily") or {}
 
 
-def build_prompt_single_tf(pair: str, summary: dict, timeframe: str) -> str:
-    display = PAIR_DISPLAY.get(pair, pair)
+def _recalculate_signal(raw: dict, pair: str, summaries: dict) -> dict:
+    """
+    Reconstruct the full signal dict from the model's simplified output.
+    entry_zone, sl_pips, tp1, tp2, risk_reward are all computed here in Python.
+    """
+    bias = raw.get("bias", "NEUTRAL")
+
+    # NEUTRAL — zero everything out
+    if bias not in ("BULLISH", "BEARISH"):
+        return {
+            "pair": pair,
+            "bias": "NEUTRAL",
+            "entry_zone": {"from": 0, "to": 0},
+            "entry_condition": raw.get("entry_condition", "Timeframes not aligned"),
+            "stop_loss": 0,
+            "sl_pips": 0,
+            "tp1": 0,
+            "tp2": 0,
+            "risk_reward": "1:0",
+            "invalidation": raw.get("invalidation", ""),
+            "confidence": int(raw.get("confidence", 0) or 0),
+            "timeframe_confluence": raw.get("timeframe_confluence", ""),
+        }
+
+    ref = _get_ref_summary(summaries)
+    atr = float(ref.get("atr") or 0)
+    ref_close = float(ref.get("close") or 0)
     pip_mult = PIP_MULTIPLIER.get(pair, 10000)
 
-    return f"""You are a professional technical analyst. Analyze {display} on the {timeframe} timeframe only.
+    entry = float(raw.get("entry", 0) or 0)
+    stop_loss = float(raw.get("stop_loss", 0) or 0)
 
-## MARKET DATA — {display} ({timeframe})
-{_tf_block(timeframe, summary, include_ema200=True)}
+    # Reject if prices are clearly wrong (0, negative, or far from actual close)
+    if ref_close > 0:
+        min_price = ref_close * 0.5
+        max_price = ref_close * 2.0
+        if not (min_price < entry < max_price) or not (min_price < stop_loss < max_price):
+            return {
+                "pair": pair,
+                "bias": bias,
+                "error": (
+                    f"Invalid prices from model (entry={entry}, sl={stop_loss}). "
+                    f"Expected near {ref_close}."
+                ),
+                "confidence": int(raw.get("confidence", 0) or 0),
+            }
+    elif entry <= 0 or stop_loss <= 0:
+        return {
+            "pair": pair,
+            "bias": bias,
+            "error": f"Model returned zero/missing prices (entry={entry}, sl={stop_loss})",
+        }
 
----
-## ANALYSIS RULES
-1. Assess bias (BULLISH/BEARISH/NEUTRAL) from this single timeframe.
-2. If no clear directional setup, set "bias": "NEUTRAL" and leave entry/SL/TP as 0.0.
-3. When directional:
-   - Entry zone based on swing levels shown above.
-   - SL beyond last opposing swing + 0.5× ATR buffer.
-   - TP1 at first swing target (1:1 minimum), TP2 at second target (1:2 minimum).
-   - sl_pips: SL distance × {pip_mult}.
+    # Validate directional logic
+    if bias == "BULLISH" and stop_loss >= entry:
+        return {"pair": pair, "bias": bias, "error": f"BULLISH but SL {stop_loss} >= entry {entry}"}
+    if bias == "BEARISH" and stop_loss <= entry:
+        return {"pair": pair, "bias": bias, "error": f"BEARISH but SL {stop_loss} <= entry {entry}"}
 
-## RESPONSE FORMAT
-Return ONLY a valid JSON object:
-{{
-  "pair": "{pair}",
-  "bias": "BULLISH",
-  "entry_zone": {{"from": 0.0000, "to": 0.0000}},
-  "entry_condition": "specific trigger",
-  "stop_loss": 0.0000,
-  "sl_pips": 0,
-  "tp1": 0.0000,
-  "tp2": 0.0000,
-  "risk_reward": "1:0.0",
-  "invalidation": "specific condition that cancels this setup",
-  "confidence": 75,
-  "timeframe_confluence": "{timeframe} standalone — no multi-TF confluence"
-}}
-Note: confidence is an integer 0-100. Use 80-100 for strong setup, 60-79 for moderate, below 60 for weak."""
+    sl_dist = abs(entry - stop_loss)
+
+    # Entry zone: ±(0.2 × ATR) around entry — fallback to 0.1% of price if ATR missing
+    zone_half = (atr * 0.2) if atr > 0 else (entry * 0.001)
+    entry_from = round(entry - zone_half, 5)
+    entry_to = round(entry + zone_half, 5)
+
+    # TP1 = 1:1 R:R, TP2 = 1:2 R:R from entry
+    if bias == "BULLISH":
+        tp1 = round(entry + sl_dist, 5)
+        tp2 = round(entry + 2 * sl_dist, 5)
+    else:
+        tp1 = round(entry - sl_dist, 5)
+        tp2 = round(entry - 2 * sl_dist, 5)
+
+    return {
+        "pair": pair,
+        "bias": bias,
+        "entry_zone": {"from": entry_from, "to": entry_to},
+        "entry_condition": raw.get("entry_condition", ""),
+        "stop_loss": round(stop_loss, 5),
+        "sl_pips": round(sl_dist * pip_mult),
+        "tp1": tp1,
+        "tp2": tp2,
+        "risk_reward": "1:2.0",
+        "invalidation": raw.get("invalidation", ""),
+        "confidence": int(raw.get("confidence", 0) or 0),
+        "timeframe_confluence": raw.get("timeframe_confluence", ""),
+    }
 
 
-def _call_gemini(prompt: str) -> tuple[dict | None, str | None]:
-    api_key = os.getenv("GEMINI_API_KEY")
+def build_merged_prompt(all_indicators: dict) -> str:
+    """
+    Scalping prompt — entry at 15m current price, tight SL from 15m ATR.
+    Model returns only: bias, entry, stop_loss, confidence + text fields.
+    All derived values calculated in Python.
+    """
+    pair_blocks = "\n".join(
+        _slim_pair_block(pair, summaries)
+        for pair, summaries in all_indicators.items()
+    )
+
+    pairs_list = list(all_indicators.keys())
+
+    # Build realistic example from first pair's 15m close (scalping entry = current price)
+    ex_pair = pairs_list[0]
+    ex_ref = all_indicators[ex_pair].get("15m") or _get_ref_summary(all_indicators[ex_pair])
+    ex_close = float(ex_ref.get("close") or 1.0)
+    ex_atr = float(ex_ref.get("atr") or ex_close * 0.001)
+    ex_entry = round(ex_close, 5)
+    ex_sl = round(ex_close - ex_atr * 1.2, 5)
+
+    pairs_str = ", ".join(pairs_list)
+
+    return f"""You are a professional forex scalping analyst. Generate SCALPING signals — enter near current price with tight stop loss.
+
+RULES:
+1. Daily SuperTrend = overall bias. 1H SuperTrend = trend filter. 15m SuperTrend = entry signal.
+2. All three agree → BULLISH or BEARISH. Any conflict → NEUTRAL.
+3. entry = 15m Close value (current market price — do NOT use distant swing levels).
+4. stop_loss: BULLISH → entry minus 1.2×ATR(15m). BEARISH → entry plus 1.2×ATR(15m).
+5. For NEUTRAL: entry=0, stop_loss=0.
+6. Target SL size: EURUSD 5-15 pips, USDJPY 8-18 pips, GOLD 15-40 pips.
+7. confidence: 85+ all TFs aligned with squeeze firing, 65-84 aligned no squeeze, below 65 skip.
+8. All prices must match the 15m Close scale (e.g. {ex_close}).
+
+MARKET DATA:
+{pair_blocks}
+
+Return ONLY valid JSON — no markdown. Example if {ex_pair} is BULLISH at 15m close {ex_close} (ATR {ex_atr:.5f}):
+{{"{ex_pair}":{{"pair":"{ex_pair}","bias":"BULLISH","entry":{ex_entry},"stop_loss":{ex_sl},"confidence":82,"entry_condition":"15m ST bullish, squeeze firing — enter at market {ex_entry}","invalidation":"15m close below {ex_sl}","timeframe_confluence":"Daily+1H+15m ST all bullish"}}}}
+
+Now return JSON for all {len(pairs_list)} pairs ({pairs_str}):"""
+
+
+def _call_groq(prompt: str) -> tuple[dict | None, str | None]:
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        return None, "GEMINI_API_KEY not set in .env  (free key at https://aistudio.google.com)"
+        return None, "GROQ_API_KEY not set in .env"
 
-    model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.2,
-                max_output_tokens=1024,
-            ),
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=900,
+            temperature=0.1,
         )
-        response = model.generate_content(prompt)
-        raw = response.text.strip()
+        raw = response.choices[0].message.content.strip()
     except Exception as exc:
-        return None, f"Gemini API call failed: {exc}"
+        return None, f"Groq API call failed: {exc}"
 
     match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
-        return None, f"No JSON found in response.\n--- RAW ---\n{raw}"
+        return None, f"No JSON found.\n--- RAW ---\n{raw}"
 
     try:
         return json.loads(match.group()), None
@@ -176,44 +209,33 @@ def _call_gemini(prompt: str) -> tuple[dict | None, str | None]:
         return None, f"JSON parse error: {exc}\n--- RAW ---\n{raw}"
 
 
-def analyze_pair(
-    pair: str,
-    all_summaries: dict,
-    focus_timeframe: str | None = None,
-) -> tuple[dict | None, str | None]:
-    if focus_timeframe:
-        summary = all_summaries.get(focus_timeframe)
-        if not summary:
-            return None, f"No data for timeframe '{focus_timeframe}'"
-        prompt = build_prompt_single_tf(pair, summary, focus_timeframe)
-    else:
-        daily = all_summaries.get("Daily", {})
-        h4 = all_summaries.get("4H", {})
-        h1 = all_summaries.get("1H", {})
-        if not (daily and h4 and h1):
-            return None, "Missing one or more timeframes (Daily/4H/1H)"
-        prompt = build_prompt_full(pair, daily, h4, h1)
+def analyze_all_pairs(all_indicators: dict, focus_timeframe: str | None = None) -> dict:
+    """One Groq call for all pairs. Prices are validated and derived fields computed in Python."""
+    print(f"  Sending 1 merged prompt for {len(all_indicators)} pairs to Groq...")
 
-    return _call_gemini(prompt)
+    prompt = build_merged_prompt(all_indicators)
+    result, error = _call_groq(prompt)
 
+    if error:
+        print(f"    ERROR: {error}")
+        return {pair: {"pair": pair, "error": error} for pair in all_indicators}
 
-def analyze_all_pairs(
-    all_indicators: dict,
-    focus_timeframe: str | None = None,
-) -> dict:
-    results: dict = {}
+    # Normalize keys — the model may use "XAUUSD", "XAUUSD (Gold)", etc. instead of "GOLD"
+    KEY_ALIASES = {
+        "XAUUSD": "GOLD", "XAUUSD (Gold)": "GOLD", "XAU/USD": "GOLD", "XAU": "GOLD",
+        "EUR/USD": "EURUSD", "USD/JPY": "USDJPY",
+    }
+    result = {KEY_ALIASES.get(k, k): v for k, v in result.items()}
 
-    for pair, tf_summaries in all_indicators.items():
-        display = PAIR_DISPLAY.get(pair, pair)
-        tf_label = f" [{focus_timeframe}]" if focus_timeframe else " [MTF]"
-        print(f"  Analysing {display}{tf_label} with Gemini 2.0 Flash...")
-
-        signal, error = analyze_pair(pair, tf_summaries, focus_timeframe)
-
-        if error:
-            print(f"    ERROR: {error}")
-            results[pair] = {"pair": pair, "error": error}
+    signals = {}
+    for pair in all_indicators:
+        raw = result.get(pair)
+        if raw is None:
+            signals[pair] = {"pair": pair, "error": "Missing from Groq response"}
         else:
-            results[pair] = signal
+            sig = _recalculate_signal(raw, pair, all_indicators[pair])
+            if "error" in sig:
+                print(f"    WARN {pair}: {sig['error']}")
+            signals[pair] = sig
 
-    return results
+    return signals
