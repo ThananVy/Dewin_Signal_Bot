@@ -4,6 +4,7 @@ Fetches data, runs analysis, sends Telegram only if signal changed, saves cache.
 Run this instead of bot.py when using scheduled cloud execution.
 """
 
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -60,16 +61,28 @@ def main():
         old_sig = last_signals.get(pair, {})
         changed, reason = signal_changed(old_sig, new_sig)
 
-        bias = new_sig.get("bias", "NEUTRAL") if "error" not in new_sig else "ERROR"
-        conf = new_sig.get("confidence", 0)
+        if "error" in new_sig:
+            print(f"{Fore.RED}  {pair}: ERROR — {new_sig['error']}")
+            continue
 
-        if changed:
-            print(f"{Fore.GREEN}  {pair}: CHANGED ({reason}, conf={conf}%) — sending alert...")
+        bias = new_sig.get("bias", "NEUTRAL")
+        conf = new_sig.get("confidence", 0)
+        min_conf = int(os.getenv("MIN_CONFIDENCE", "60"))
+
+        print(f"{Fore.CYAN}  {pair}: bias={bias}  conf={conf}%  changed={changed}  reason='{reason}'")
+
+        if not changed:
+            print(f"{Fore.WHITE}    → Skipping: no change from last run.")
+        elif bias not in ("BULLISH", "BEARISH"):
+            print(f"{Fore.YELLOW}    → Skipping: NEUTRAL setup.")
+        elif int(conf) < min_conf:
+            print(f"{Fore.YELLOW}    → Skipping: confidence {conf}% below threshold {min_conf}%.")
+        else:
+            print(f"{Fore.GREEN}    → Sending Telegram alert...")
             sent = bot.send_signal(new_sig, reason)
             if sent:
                 sent_any = True
-        else:
-            print(f"{Fore.WHITE}  {pair}: No change ({bias}, conf={conf}%) — skipping.")
+                print(f"{Fore.GREEN}    → Sent OK.")
 
     if not sent_any:
         print(f"{Fore.WHITE}No signals sent this run.")

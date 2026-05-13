@@ -81,11 +81,15 @@ def signal_changed(old: dict, new: dict) -> tuple[bool, str]:
             return True, f"Direction flipped: {old_bias} → {new_bias}"
         return True, f"New {new_bias} setup detected"
 
-    old_conf = old.get("confidence", "")
-    new_conf = new.get("confidence", "")
-    conf_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-    if conf_rank.get(new_conf, 0) > conf_rank.get(old_conf, 0):
-        return True, f"Confidence upgraded: {old_conf} → {new_conf}"
+    def _to_score(c) -> int:
+        if isinstance(c, (int, float)):
+            return int(c)
+        return {"LOW": 30, "MEDIUM": 60, "HIGH": 80}.get(str(c).upper(), 0)
+
+    old_score = _to_score(old.get("confidence", 0))
+    new_score = _to_score(new.get("confidence", 0))
+    if new_score >= old_score + 10:
+        return True, f"Confidence upgraded: {old_score}% → {new_score}%"
 
     return False, ""
 
