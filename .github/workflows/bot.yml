@@ -1,7 +1,7 @@
 name: Forex Signal Bot
 
 on:
-  workflow_dispatch:  # Triggered by cron-job.org every 10 minutes
+  workflow_dispatch:  # Triggered by cron-job.org every 15 min at :01/:16/:31/:46 (Mon-Fri)
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -34,5 +34,5 @@ jobs:
           GROQ_MODEL: llama-3.1-8b-instant
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
-          MIN_CONFIDENCE: ${{ secrets.MIN_CONFIDENCE || '60' }}
+          MIN_CONFIDENCE: ${{ secrets.MIN_CONFIDENCE || '80' }}
         run: python run_once.py

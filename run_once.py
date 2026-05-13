@@ -27,7 +27,7 @@ VALID_PAIRS = list(PAIRS.keys())
 
 def is_trading_session() -> bool:
     now = datetime.now(ICT)
-    return now.weekday() < 5 and 7 <= now.hour < 23
+    return now.weekday() < 5 and 8 <= now.hour < 23
 
 
 def main():
@@ -59,7 +59,7 @@ def main():
     signals = analyze_all_pairs(indicators)
 
     bot = TelegramBot()
-    min_conf = int(os.getenv("MIN_CONFIDENCE", "60"))
+    min_conf = int(os.getenv("MIN_CONFIDENCE", "80"))
 
     for pair, new_sig in signals.items():
         old_sig = last_signals.get(pair, {})

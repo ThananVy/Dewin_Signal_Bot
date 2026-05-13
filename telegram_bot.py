@@ -35,7 +35,7 @@ def _parse_chat_ids() -> list[str]:
 
 
 def _min_confidence() -> int:
-    return int(os.getenv("MIN_CONFIDENCE", "60"))
+    return int(os.getenv("MIN_CONFIDENCE", "80"))
 
 
 class TelegramBot:
@@ -112,7 +112,7 @@ class TelegramBot:
             "─────────────────────\n"
             f"<b>Entry</b>  {p(entry, pair)}\n"
             f"<b>SL</b>     {p(sl, pair)}  (-{sl_pips} pips)\n"
-            f"<b>BE</b>     {p(be, pair)}  (move SL at +{sl_pips} pips)\n"
+            f"<b>BE</b>     {p(be, pair)}  (move SL to entry when hit)\n"
             f"<b>TP</b>     {p(tp, pair)}  (+{tp_pips} pips)\n"
             "─────────────────────\n"
             f"<i>{signal.get('entry_condition', '')}</i>\n"

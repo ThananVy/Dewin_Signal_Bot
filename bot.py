@@ -27,7 +27,7 @@ HEARTBEAT_EVERY = 60  # minutes
 
 def is_trading_session() -> bool:
     now = datetime.now(ICT)
-    return now.weekday() < 5 and 7 <= now.hour < 23
+    return now.weekday() < 5 and 8 <= now.hour < 23
 
 
 def load_cache() -> dict:
