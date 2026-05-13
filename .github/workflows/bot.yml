@@ -1,0 +1,42 @@
+name: Forex Signal Bot
+
+on:
+  schedule:
+    # Every 10 minutes, Monday to Friday only
+    - cron: '*/10 * * * 1-5'
+  workflow_dispatch:  # Allows manual trigger from GitHub UI
+
+jobs:
+  run-signals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Restore signal cache from previous run (for change detection)
+      - name: Restore signal cache
+        uses: actions/cache@v4
+        with:
+          path: signal_cache.json
+          key: signal-cache-${{ github.run_id }}
+          restore-keys: |
+            signal-cache-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run analysis and send signals
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: llama-3.3-70b-versatile
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          MIN_CONFIDENCE: ${{ secrets.MIN_CONFIDENCE || '60' }}
+        run: python run_once.py
