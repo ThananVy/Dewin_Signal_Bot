@@ -1,15 +1,15 @@
 """
-claude_analyst.py — Builds structured prompts and calls the Groq API.
-Uses Llama 3.3 70B (free tier) via Groq for trading signal analysis.
+claude_analyst.py — Builds structured prompts and calls Google Gemini API.
+Uses gemini-2.0-flash (free tier: 1,500 requests/day, 1M tokens/day).
 
-Free API key: https://console.groq.com  (no credit card required)
+Free API key: https://aistudio.google.com  (no credit card required)
 """
 
 import json
 import os
 import re
 
-from groq import Groq
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -145,26 +145,27 @@ Return ONLY a valid JSON object:
 Note: confidence is an integer 0-100. Use 80-100 for strong setup, 60-79 for moderate, below 60 for weak."""
 
 
-def _call_groq(prompt: str) -> tuple[dict | None, str | None]:
-    api_key = os.getenv("GROQ_API_KEY")
+def _call_gemini(prompt: str) -> tuple[dict | None, str | None]:
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return None, "GROQ_API_KEY not set in .env  (get a free key at https://console.groq.com)"
+        return None, "GEMINI_API_KEY not set in .env  (free key at https://aistudio.google.com)"
 
-    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
     try:
-        client = Groq(api_key=api_key)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1024,
-            temperature=0.2,
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.2,
+                max_output_tokens=1024,
+            ),
         )
-        raw = response.choices[0].message.content.strip()
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
     except Exception as exc:
-        return None, f"Groq API call failed: {exc}"
+        return None, f"Gemini API call failed: {exc}"
 
-    # Extract JSON — handle optional markdown code fences
     match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
         return None, f"No JSON found in response.\n--- RAW ---\n{raw}"
@@ -193,7 +194,7 @@ def analyze_pair(
             return None, "Missing one or more timeframes (Daily/4H/1H)"
         prompt = build_prompt_full(pair, daily, h4, h1)
 
-    return _call_groq(prompt)
+    return _call_gemini(prompt)
 
 
 def analyze_all_pairs(
@@ -205,7 +206,7 @@ def analyze_all_pairs(
     for pair, tf_summaries in all_indicators.items():
         display = PAIR_DISPLAY.get(pair, pair)
         tf_label = f" [{focus_timeframe}]" if focus_timeframe else " [MTF]"
-        print(f"  Analysing {display}{tf_label} with Llama 3.3 70B (Groq)...")
+        print(f"  Analysing {display}{tf_label} with Gemini 2.0 Flash...")
 
         signal, error = analyze_pair(pair, tf_summaries, focus_timeframe)
 
