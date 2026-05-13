@@ -33,7 +33,7 @@ from telegram_bot import TelegramBot
 
 CACHE_FILE = Path(__file__).parent / "signal_cache.json"
 VALID_PAIRS = list(PAIRS.keys())
-HEARTBEAT_EVERY = 4 * 60  # minutes
+HEARTBEAT_EVERY = 1 * 60  # minutes
 
 
 # ─────────────────────────────────────────────
